@@ -17,7 +17,7 @@ public:
      * @param message Notification message
      * @param timeout Number of seconds to display for
      */
-    static void notify(const std::string &title, const std::string &message, const std::chrono::seconds &timeout = std::chrono::seconds(0));
+    static void notify(const std::string &title, const std::string &message, const std::chrono::seconds &timeout = std::chrono::seconds(10));
 
 };
 

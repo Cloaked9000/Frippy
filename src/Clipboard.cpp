@@ -104,6 +104,7 @@ ConversionTarget choose_conversion_target(Display *disp, const Property &prop, A
     for(size_t i = 0; i < prop.nitems; i++)
     {
         std::string atom_name = GetAtomName(disp, atom_list[i]);
+        std::cout << "Available conversion: " << atom_name << std::endl;
         if(auto iter = std::find_if(xa_priority.begin(), xa_priority.end(), [&](const std::pair<std::string, std::string> &elem) {return elem.first == atom_name;}); iter != xa_priority.end())
         {
             size_t this_score = std::distance(xa_priority.begin(), iter);
@@ -115,6 +116,7 @@ ConversionTarget choose_conversion_target(Display *disp, const Property &prop, A
             }
         }
     }
+    std::cout << "Requesting as: " << chosen_name << "(" << chosen_index << ")" << std::endl;
     return {atom_list[chosen_index], chosen_name};
 }
 

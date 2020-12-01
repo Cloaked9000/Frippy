@@ -23,6 +23,7 @@ static const char *default_config = "{\n"
                               "                 {\"type\": \"image/tiff\", \"extension\": \"tiff\"},\n"
                               "                 {\"type\": \"video/webm\", \"extension\": \"webm\"},\n"
                               "                 {\"type\": \"video/html\", \"extension\": \"html\"},\n"
+                              "                 {\"type\": \"text/plain\", \"extension\": \"txt\"},\n"
                               "                 {\"type\": \"UTF8_STRING\", \"extension\": \"txt\"}]\n"
                               "}";
 
@@ -93,6 +94,7 @@ bool load_system_ca_store(const std::shared_ptr<fr::SSLContext>& context)
 
 std::string get_file_mimetype(const std::vector<std::pair<std::string, std::string>> &xa_priority, const std::string &filepath)
 {
+    std::cout << "Filepath: " << filepath << std::endl;
     auto pos = filepath.find_last_of('.');
     std::string extension = pos == std::string::npos ? "txt" : filepath.substr(pos + 1);
     auto iter = std::find_if(xa_priority.begin(), xa_priority.end(), [&](const std::pair<std::string, std::string> &elem) {
@@ -121,7 +123,13 @@ void do_upload_clipboard(Clipboard &clipboard, const std::string &url, const std
 
 
     //If it's a filepath, read in the image. Raw image data wont begin with this.
-    if(clip.data[0] == '/')
+    std::cout << "Data: " << clip.data << std::endl;
+    if(clip.data.starts_with("file://"))
+    {
+        clip.data.erase(0, 7);
+    }
+
+    if(clip.data.starts_with('/'))
     {
         clip.type = get_file_mimetype(xa_priority, clip.data);
         clip.data = read_file(clip.data);
@@ -179,7 +187,7 @@ void do_upload_clipboard(Clipboard &clipboard, const std::string &url, const std
 
     json json_response = json::parse(response.get_body());
     std::string download_link = json_response.at("download-link");
-    Notifier::notify("Your Link", download_link, std::chrono::seconds(10));
+    Notifier::notify("Your Link", "<a href=\"" + download_link + "\"> " + download_link + "</a>", std::chrono::seconds(10));
 }
 
 int main()

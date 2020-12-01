@@ -17,7 +17,7 @@ pkg_check_modules(MY_PKG REQUIRED IMPORTED_TARGET libnotifymm-1.0 glibmm-2.4)
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} ${CORE_CXX_FLAGS} ${EXTRA_DEBUG_FLAGS} -g3 -O0")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${CORE_CXX_FLAGS} -g -O2")
 
-add_executable(ClipUpload main.cpp src/Clipboard.cpp include/Clipboard.h src/Notifier.cpp include/Notifier.h src/Keyboard.cpp include/Keyboard.h)
+add_executable(ClipUpload main.cpp src/Clipboard.cpp include/Clipboard.h src/Notifier.cpp include/Notifier.h src/Keyboard.cpp include/Keyboard.h src/Uploader.cpp include/Uploader.h include/SystemUtil.h)
 target_link_libraries(ClipUpload -lX11 -lmbedx509)
 
 # Link frnetlib

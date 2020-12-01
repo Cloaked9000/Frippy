@@ -10,7 +10,11 @@
 #include <frnetlib/URL.h>
 #include <Notifier.h>
 #include <Keyboard.h>
+#include <Uploader.h>
+#include <SystemUtil.h>
 
+#pragma clang diagnostic push
+#pragma ide diagnostic ignored "EndlessLoop"
 #define CONFIG_PATH "config.json"
 using json = nlohmann::json;
 
@@ -27,44 +31,6 @@ static const char *default_config = "{\n"
                               "                 {\"type\": \"UTF8_STRING\", \"extension\": \"txt\"}]\n"
                               "}";
 
-bool does_file_exist(const std::string &filepath)
-{
-    struct stat st = {};
-    return stat(filepath.c_str(), &st) == 0;
-}
-
-std::string read_file(const std::string &path)
-{
-    //Open the file
-    std::string data;
-    std::ifstream stream(path);
-    if(!stream.is_open())
-        throw std::runtime_error("Failed to open path '" + path + "': " + strerror(errno));
-
-    //Figure out its size and resize buffers appropriately
-    stream.seekg(0, std::ios::end);
-    data.resize(stream.tellg());
-    stream.seekg(0, std::ios::beg);
-
-    //Read in data
-    stream.read(data.data(), data.size());
-
-    if(!stream.good())
-        throw std::runtime_error("Bad read from '" + path + "': " + strerror(errno));
-
-    return data;
-}
-
-void write_file(const std::string &path, const std::string &data)
-{
-    std::ofstream stream(path.c_str());
-    if(!stream.is_open())
-        throw std::runtime_error("Failed to open file '" + path + "' for writing: " + strerror(errno));
-    stream.write(data.c_str(), data.size());
-    if(!stream.good())
-        throw std::runtime_error("Failed to write to '" + path + "': " + strerror(errno));
-}
-
 std::string get_type_extension(const std::vector<std::pair<std::string, std::string>> &xa_priority, const std::string &type)
 {
     auto iter = std::find_if(xa_priority.begin(), xa_priority.end(), [&](const std::pair<std::string, std::string> &elem) {
@@ -75,22 +41,6 @@ std::string get_type_extension(const std::vector<std::pair<std::string, std::str
     return iter->second;
 }
 
-bool load_system_ca_store(const std::shared_ptr<fr::SSLContext>& context)
-{
-    static const std::vector<std::string> possible_locations = {"/etc/ssl/certs/ca-certificates.crt",                 // Debian/Ubuntu/Gentoo etc.
-                                                                "/etc/pki/tls/certs/ca-bundle.crt",                   // Fedora/RHEL 6
-                                                                "/etc/ssl/ca-bundle.pem",                             // OpenSUSE
-                                                                "/etc/pki/tls/cacert.pem",                            // OpenELEC
-                                                                "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"}; // CentOS/RHEL 7
-    for(auto &loc : possible_locations)
-    {
-        if(context->load_ca_certs_from_file(loc))
-        {
-            return true;
-        }
-    }
-    return false;
-}
 
 std::string get_file_mimetype(const std::vector<std::pair<std::string, std::string>> &xa_priority, const std::string &filepath)
 {
@@ -105,103 +55,44 @@ std::string get_file_mimetype(const std::vector<std::pair<std::string, std::stri
     return iter->first;
 }
 
-void do_upload_clipboard(Clipboard &clipboard, const std::string &url, const std::string &password, const std::vector<std::pair<std::string, std::string>> &xa_priority)
+Clipboard::Target choose_best_conversion_target(const std::vector<std::pair<std::string, std::string>> &pref, const std::vector<Clipboard::Target> &available)
 {
-    //Read clipboard
-    Clipboard::ClipboardRead clip;
-    try
+    //We basically need to loop over the list of possible clipboard conversions, and then pick the one (if any)
+    //that's furthest up our priority list.
+    auto score = std::numeric_limits<size_t>::max();
+    size_t chosen_index = 0;
+
+    for(size_t i = 0; i < available.size(); i++)
     {
-        clip = clipboard.read_clipboard();
-        if(clip.data.empty())
-            return;
+        std::cout << "Available conversion: " << available[i].name << std::endl;
+        if(auto iter = std::find_if(pref.begin(), pref.end(), [&](const std::pair<std::string, std::string> &elem) {return elem.first == available[i].name;}); iter != pref.end())
+        {
+            size_t this_score = std::distance(pref.begin(), iter);
+            if(this_score < score)
+            {
+                score = this_score;
+                chosen_index = i;
+            }
+        }
     }
-    catch(const std::exception &e)
-    {
-        Notifier::notify("Upload Failed", e.what());
-        return;
-    }
+    assert(chosen_index < available.size());
 
-
-    //If it's a filepath, read in the image. Raw image data wont begin with this.
-    std::cout << "Data: " << clip.data << std::endl;
-    if(clip.data.starts_with("file://"))
-    {
-        clip.data.erase(0, 7);
-    }
-
-    if(clip.data.starts_with('/'))
-    {
-        clip.type = get_file_mimetype(xa_priority, clip.data);
-        clip.data = read_file(clip.data);
-    }
-
-    //Establish a connection with the upload server
-    fr::URL parsed_url(url);
-    std::shared_ptr<fr::Socket> socket;
-    if(parsed_url.get_port() == "443")
-    {
-        auto ssl_context = std::make_shared<fr::SSLContext>();
-        if(!load_system_ca_store(ssl_context))
-            throw std::runtime_error("Failed to load system CA store!");
-        socket = std::make_shared<fr::SSLSocket>(ssl_context);
-    }
-    else
-    {
-        socket = std::make_shared<fr::TcpSocket>();
-    }
-
-
-    fr::Socket::Status status = socket->connect(parsed_url.get_host(), parsed_url.get_port(), {std::chrono::seconds(5)});
-    if(status != fr::Socket::Status::Success)
-    {
-        Notifier::notify("Upload Failed","Failed to connect: " + fr::Socket::status_to_string(status));
-        return;
-    }
-
-    fr::HttpRequest request;
-    request.set_uri(parsed_url.get_uri());
-    request.header("api-key") = password;
-    request.header("file-type") = get_type_extension(xa_priority, clip.type);
-    request.set_body(clip.data);
-
-    status = socket->send(request);
-    if(status != fr::Socket::Status::Success)
-    {
-        Notifier::notify("Upload Failed","Failed to send request: " + fr::Socket::status_to_string(status));
-        return;
-    }
-
-    fr::HttpResponse response;
-    status = socket->receive(response);
-    if(status != fr::Socket::Status::Success)
-    {
-        Notifier::notify("Upload Failed","Failed to receive request: " + fr::Socket::status_to_string(status));
-        return;
-    }
-
-    if(response.get_status() != fr::Http::RequestStatus::Ok)
-    {
-        Notifier::notify("Upload Failed", std::to_string((int)response.get_status()) + " response code!");
-        return;
-    }
-
-    json json_response = json::parse(response.get_body());
-    std::string download_link = json_response.at("download-link");
-    Notifier::notify("Your Link", "<a href=\"" + download_link + "\"> " + download_link + "</a>", std::chrono::seconds(10));
+    std::cout << "Requesting as: " << available[chosen_index].name << "(" << chosen_index << ")" << std::endl;
+    return available[chosen_index];
 }
 
 int main()
 {
     //Check if config exists, write a blank one if it doesn't
-    if(!does_file_exist(CONFIG_PATH))
+    if(!SystemUtil::does_file_exist(CONFIG_PATH))
     {
-        write_file(CONFIG_PATH, default_config);
+        SystemUtil::write_file(CONFIG_PATH, default_config);
         Notifier::notify("Default Config Created", "Created a default config file. Please fill it in.");
         return 0;
     }
 
     //Read in config
-    json config = json::parse(read_file(CONFIG_PATH));
+    json config = json::parse(SystemUtil::read_file(CONFIG_PATH));
     std::string url = config.at("url");
     std::string password = config.at("password");
     std::vector<std::pair<std::string, std::string>> xa_priority;
@@ -222,7 +113,30 @@ int main()
         keyboard.wait_for_keys(key, modifier);
         if(modifier.key_pressed)
         {
-           do_upload_clipboard(clipboard, url, password, xa_priority);
+            auto list = clipboard.list_available_conversions();
+            std::cout << "Available conversions: " << std::endl;
+
+            auto best = choose_best_conversion_target(xa_priority, list);
+            std::cout << "Requesting..." << std::endl;
+            std::string clip_content;
+            clipboard.read_clipboard(best, [&clip_content](const std::string &data) -> bool {
+                clip_content.append(data);
+                return true;
+            });
+
+            if(clip_content.starts_with("file://"))
+            {
+                clip_content.erase(0, 7);
+                best.name = get_file_mimetype(xa_priority, clip_content);
+                clip_content = SystemUtil::read_file(clip_content);
+            }
+
+            Uploader uploader;
+            std::string response = uploader.upload(url, {{"api-key", password}, {"file-type", get_type_extension(xa_priority, best.name)}}, clip_content);
+            json json_response = json::parse(response);
+            std::string download_link = json_response.at("download-link");
+            Notifier::notify("Your Link", "<a href=\"" + download_link + "\"> " + download_link + "</a>", std::chrono::seconds(10));
         }
     }
 }
+#pragma clang diagnostic pop

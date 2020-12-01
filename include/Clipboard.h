@@ -11,15 +11,17 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <functional>
 
 struct _XDisplay;
 class Clipboard
 {
 public:
-    struct ClipboardRead
+
+    struct Target
     {
-        std::string data; //raw clipboard data
-        std::string type; //mime type of data
+        std::string name;
+        unsigned long atom;
     };
 
     /*!
@@ -34,12 +36,9 @@ public:
     void operator=(Clipboard&&)=delete;
     void operator=(const Clipboard&&)=delete;
 
-    /*!
-     * Reads the current clipboard then returns its mimetype/data
-     *
-     * @return The clipboard
-     */
-    ClipboardRead read_clipboard();
+    bool read_clipboard(const Target &target, const std::function<bool(const std::string &data)> &handler);
+
+    std::vector<Target> list_available_conversions();
 
 private:
 

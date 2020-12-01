@@ -50,12 +50,6 @@ public:
     Atom type;
 };
 
-struct ConversionTarget
-{
-    Atom atom;
-    std::string type;
-};
-
 Property read_property(Display* display, Window window, Atom property, Bool delete_old)
 {
     Atom actual_type;
@@ -79,47 +73,6 @@ Property read_property(Display* display, Window window, Atom property, Bool dele
 
     return {ret, actual_format, nitems, actual_type};
 }
-
-ConversionTarget choose_conversion_target(Display *disp, const Property &prop, Atom xa_target, const std::vector<std::pair<std::string, std::string>> &xa_priority)
-{
-    //The list of targets is a list of atoms, so it should have type XA_ATOM
-    //but it may have the type TARGETS instead.
-    if((prop.type != XA_ATOM && prop.type != xa_target) || prop.format != 32)
-    {
-        return {None, "None"};
-    }
-
-    if(prop.nitems == 0)
-    {
-        return {None, "None"};
-    }
-
-    //We basically need to loop over the list of possible clipboard conversions, and then pick the one (if any)
-    //that's furthest up our priority list.
-    auto score = std::numeric_limits<size_t>::max();
-    size_t chosen_index = 0;
-    std::string chosen_name;
-
-    Atom *atom_list = (Atom*)prop.data;
-    for(size_t i = 0; i < prop.nitems; i++)
-    {
-        std::string atom_name = GetAtomName(disp, atom_list[i]);
-        std::cout << "Available conversion: " << atom_name << std::endl;
-        if(auto iter = std::find_if(xa_priority.begin(), xa_priority.end(), [&](const std::pair<std::string, std::string> &elem) {return elem.first == atom_name;}); iter != xa_priority.end())
-        {
-            size_t this_score = std::distance(xa_priority.begin(), iter);
-            if(this_score < score)
-            {
-                score = this_score;
-                chosen_index = i;
-                chosen_name = std::move(atom_name);
-            }
-        }
-    }
-    std::cout << "Requesting as: " << chosen_name << "(" << chosen_index << ")" << std::endl;
-    return {atom_list[chosen_index], chosen_name};
-}
-
 
 Clipboard::Clipboard(std::vector<std::pair<std::string, std::string>> xa_priority_)
 {
@@ -159,26 +112,23 @@ Clipboard::~Clipboard()
     XCloseDisplay(display);
 }
 
-Clipboard::ClipboardRead Clipboard::read_clipboard()
+bool Clipboard::read_clipboard(const Target &conversion_target, const std::function<bool(const std::string &data)> &handler)
 {
-    //Get the target list
-    std::atomic_flag conversions_read(false);
-    XConvertSelection(display, clipboard_atom, xa_targets_atom, clipboard_atom, our_window, CurrentTime);
+    //Request conversion
+    XConvertSelection(display, clipboard_atom, conversion_target.atom, clipboard_atom, our_window, CurrentTime);
 
     //Enter into an event loop to process the clipboard responses
     XEvent event;
-    ClipboardRead clipboard_read = {};
-    ConversionTarget conversionTarget{None, "None"};
     while(true)
     {
         XNextEvent(display, &event);
+        Property prop = read_property(display, our_window, clipboard_atom, False);
 
         //If the clipboard data is being sent in batches, and we've got a new batch
-        if(event.type == PropertyNotify && event.xproperty.state == PropertyNewValue && event.xproperty.atom == clipboard_atom)
+        if(event.type == PropertyNotify && event.xproperty.state == PropertyNewValue)
         {
-            Property prop = read_property(display, our_window, clipboard_atom, False);
             auto prop_len = prop.nitems * prop.format / 8;
-            clipboard_read.data.append((char*)prop.data, prop_len);
+            handler(std::string((char*)prop.data, prop_len));
             XDeleteProperty(event.xproperty.display, our_window, clipboard_atom); //indicate that we've read the data
             if(prop_len == 0) //if the length is 0 then there's nothing left to read
             {
@@ -186,49 +136,62 @@ Clipboard::ClipboardRead Clipboard::read_clipboard()
             }
         }
 
+        //Else this is the data itself
         if(event.type != SelectionNotify)
         {
             continue;
         }
 
-        Atom target = event.xselection.target;
-        if(event.xselection.property == None)
-            throw std::runtime_error("No possible conversions");
-
-        //Read the clipboard property
-        Property prop = read_property(display, our_window, clipboard_atom, False);
-
-        //If this is a list of possible conversions, parse it, so we can request data in the right format
-        if(target == xa_targets_atom && !conversions_read.test_and_set())
+        //incr indicates the data will be sent in batches, setup listening for future events and start it off
+        if(prop.type == incr_atom)
         {
-            //Figure out which conversion we want to use
-            conversionTarget = choose_conversion_target(display, prop, xa_targets_atom, xa_priority);
-            if(conversionTarget.atom == None)
-                throw std::runtime_error("No viable conversion of target available");
-
-            //Now request that specific conversion
-            XConvertSelection(display, clipboard_atom, conversionTarget.atom, clipboard_atom, our_window, CurrentTime);
-            clipboard_read.type = conversionTarget.type;
+            XSelectInput(event.xselection.display, event.xselection.requestor, PropertyChangeMask); //we need to know when the property changes
+            XDeleteProperty(event.xselection.display, event.xselection.requestor, event.xselection.property); //indicate start of transfer
             continue;
         }
 
-        //If this is the data itself, receive it
-        if(target == conversionTarget.atom)
-        {
-            //incr indicates the data will be sent in batches, setup listening for future events and start it off
-            if(prop.type == incr_atom)
-            {
-                XSelectInput(event.xselection.display, event.xselection.requestor, PropertyChangeMask); //we need to know when the property changes
-                XDeleteProperty(event.xselection.display, event.xselection.requestor, event.xselection.property); //indicate start of transfer
-                continue;
-            }
-
-            //else we have the data, store it and exit
-            auto prop_len = prop.nitems * prop.format / 8;
-            clipboard_read.data.append((char*)prop.data, prop_len);
-            break;
-        }
+        //else we have the data, store it and exit
+        auto prop_len = prop.nitems * prop.format / 8;
+        handler(std::string((char*)prop.data, prop_len));
+        break;
     }
 
-    return clipboard_read;
+    return true;
+}
+
+std::vector<Clipboard::Target> Clipboard::list_available_conversions()
+{
+    std::vector<Target> available_targets;
+
+    //Get the target list
+    XConvertSelection(display, clipboard_atom, xa_targets_atom, clipboard_atom, our_window, CurrentTime);
+
+    //Enter into an event loop to process the clipboard responses
+    XEvent event;
+    while(true)
+    {
+        XNextEvent(display, &event);
+
+        if(event.type != SelectionNotify)
+        {
+            continue;
+        }
+
+        if(event.xselection.property == None)
+        {
+            return {}; // no targets
+        }
+
+        Property prop = read_property(display, our_window, clipboard_atom, False);
+        Atom *atom_list = (Atom*)prop.data;
+        for(size_t i = 0; i < prop.nitems; i++)
+        {
+            std::string atom_name = GetAtomName(display, atom_list[i]);
+            available_targets.emplace_back(Target({std::move(atom_name), atom_list[i]}));
+        }
+
+        break;
+    }
+
+    return available_targets;
 }
